@@ -1,32 +1,43 @@
 module Analysis
     (
 	--cShift
-	nchr
+	cprod
+	, nchr
+	, asciiFromB16
+	, asciiFromB64
+	, asciiToB16
+	, asciiToB64
 	, nord
 	, nAlphabet
---	, alphabet
---	, clean
 	, count2freq
 	, txt2count
 	, kapa
-	, corr
 	, scorr
+	, totalFreq
+	, totalFreqUpper
 	, target
 	, Analysis.toUpper
 	, Analysis.toLower
-	, engFreq
-	, engMap
-	, hamming
---	, splitIC
---	, ixOfMin
---	, ixOfMax
---	, splitText
---	, corr
---	, isUpperChar
---	, affineShift
---	, affineDeshift
---	, modinv
+	, cengFreq
+	, wengFreq
+	, cengMap
+	, wengMap
+	, asciiMap
+	, ham
+	, bham
+	, hamlet
+	, solve
+	, encrypt
+	, encrypt1
+	, encrypt2
+	, ic
+	, icUpper
+	, bestIcs
+	, bestIcUppers
+	, bestPlainTexts
+	, normDist
     ) where
+    
 
 import System.IO
 import Control.Monad
@@ -34,24 +45,108 @@ import Data.Array as A
 import Data.Char as C
 import Data.Word
 import Data.Maybe
+import Data.Either
 import Data.Monoid
 import Data.Map as M
 import Data.List as L
 import Text.Printf
 import Data.Tuple (swap)
-import Data.ByteString as B
-
+--import Data.ByteString as B
+import Data.ByteString.Lazy as B  hiding (split) 
+import Data.ByteString.Base64.Lazy as B64
+import Data.ByteString.Base16.Lazy as B16
+import GHC.Exts
 import Data.ByteString.Internal (c2w, w2c)
+import Data.Bits
+import Data.Int
+
 --import Data.ByteString.Char8 (pack)
 --import GHC.Word (Word8)
 
+-- This is the cartesion product of a list of lists
+cprod = L.foldr f [[]]
+    where f xs yss = L.foldr g [] xs
+           where g x zss = L.foldr h zss yss
+                  where h ys uss = (x:ys):uss
 
-hamming :: String -> String -> Int
-hamming xs ys = L.length (L.filter not (L.zipWith (==) xs ys))
+right::Either a b -> b
+right e = L.head $ rights [e]    
 
-bhamming :: ByteString -> ByteString -> Int
-bhamming = undefined
---bhamming xs ys = B.length (B.filter not (B.zipWith (==) xs ys))
+--asciiFromB16::ByteString->ByteString
+asciiFromB16 = fst . B16.decode
+asciiFromB64 = right . B64.decode
+asciiToB64 = B64.encode
+asciiToB16 = B16.encode
+
+ham::[Char]->[Char]->Int
+ham s1 s2 = L.sum $ L.zipWith (\c1 c2 -> hamlet (c2w c1) (c2w c2)) s1 s2
+
+bham::ByteString->ByteString->Int
+bham s1 s2 = L.sum $ B.zipWith hamlet s1 s2
+
+-- Adds up the ones in the binary xor
+hamlet::Word8->Word8->Int
+hamlet w1 w2 = popCount $ w1 `xor` w2
+
+solve::Int->ByteString->[(Int, Double, ByteString)]
+solve n input = L.map (\kd -> let (key, diff)=kd in (key, diff, encrypt1 key input)) kds
+    where
+        kds = bestIcs n input
+
+-- encrpyts 2 equal length buffers        
+encrypt::ByteString->ByteString->ByteString
+encrypt key = B.pack . B.zipWith xor key
+decrypt key = encrypt
+ 
+-- encrypts a buffer with a a sinle character key
+encrypt1::Int->ByteString->ByteString
+encrypt1 key =  B.map (xor $ fromIntegral $ key) 
+decrypt1 key = encrypt1
+  
+-- Encrypts with a repeating key (ie. Vignere cipher)
+encrypt2::ByteString->ByteString->ByteString  
+encrypt2 ks cts = encrypt cts $ B.cycle ks
+
+icUpper::Int->ByteString->Double
+icUpper n bs = totalFreqUpper $ L.map (C.toUpper . w2c) $ B.unpack $ encrypt1 n bs
+  
+ic::Int->ByteString->Double
+ic n bs = totalFreq $ L.map w2c $ B.unpack $ encrypt1 n bs
+  
+bestIcs::Int->ByteString->[(Int, Double)]
+bestIcs n ct = L.map swap $ L.take n $ L.reverse $ sort $ L.map (\n-> (ic n ct, n)) [0..127]
+
+bestIcUppers::Int->ByteString->[(Int, Double)]
+bestIcUppers n ct = L.map swap $ L.take n $ L.reverse $ sort $ L.map (\n-> (icUpper n ct, n)) [65..90]
+
+--    where
+--        ics = L.map (\n-> (n, ic n ct) ) [0..127]
+--        minDiff = L.foldl (\a nic -> if (snd nic > snd a) then nic else a) (-1,-1000.0) ics
+--        next1Diff = L.foldl (\a nic -> if (snd nic > snd a) then nic else a) (-1,-1000.0) $ L.filter (\nic -> snd nic<snd minDiff) ics
+--        next2Diff = L.foldl (\a nic -> if (snd nic > snd a) then nic else a) (-1,-1000.0) $ L.filter (\nic -> snd nic<snd next1Diff) ics
+              
+bestPlainTexts::Int->ByteString->[(ByteString, Double)]
+bestPlainTexts n ct = L.map (\bd -> let (bs, d)=bd in (encrypt1 bs ct, d)) bds
+    where
+        bds = bestIcs n ct
+
+-- Takes a keySize and a string
+-- Gets 4 strings of size keySize from the input string
+-- Works out the hamming distance (by doing an average with 4 strings)
+-- Normalises by dividing by the keySize and returns that result
+normDist::Int64->ByteString->Double
+normDist keySize ct = 0.25/(fromIntegral keySize) * fromIntegral (diff1+diff2+diff3+diff4)
+    where
+        diff1 =  L.sum $ B.zipWith hamlet (B.take keySize $ B.drop (keySize*0) ct) $ B.take keySize $ B.drop (keySize*1) ct
+        diff2 =  L.sum $ B.zipWith hamlet (B.take keySize $ B.drop (keySize*1) ct) $ B.take keySize $ B.drop (keySize*2) ct
+        diff3 =  L.sum $ B.zipWith hamlet (B.take keySize $ B.drop (keySize*2) ct) $ B.take keySize $ B.drop (keySize*3) ct
+        diff4 =  L.sum $ B.zipWith hamlet (B.take keySize $ B.drop (keySize*3) ct) $ B.take keySize $ B.drop (keySize*4) ct
+                
+ualphabet::String
+ualphabet = L.map (\i -> C.toUpper $ w2c $ nchr i) [0..63]
+ 
+alphabet::String
+alphabet = L.map (\i -> w2c $ nchr i) [0..63]
 
 -- Counts of the letters in a text
 data  ICount = ICount (Map Word8 Int) deriving (Show)
@@ -69,8 +164,6 @@ instance Monoid ICount where
 -- Increment the count by 1
 cInsert::ICount->Word8->ICount
 cInsert (ICount m) c = ICount $ insertWith (+) c 1 m
---cInsert (ICount m) c = if (ord $ w2c c)>64 && (ord $ w2c c)<91 then ICount $ insertWith (+) c 1 m else ICount $ insertWith (+) (c2w '~') 1 m
---cInsert (ICount m) c = if (ord $ w2c c)>64 && (ord $ w2c c)<91 then ICount $ insertWith (+) c 1 m else ICount m
 
 -- counts the occurences of each character in a string
 txt2count::ByteString->ICount
@@ -92,8 +185,8 @@ kapa (ICount fs) = (M.foldlWithKey (\a k f -> (fromIntegral $ f*(f-1))+a) (0.0) 
         where
             tot = M.foldl (+) 0 fs
 
-corr::ICount->Double
-corr (ICount fs) = M.foldl (+) 0.0 $ M.intersectionWith (\f l -> (fromIntegral f)*l) fs engMap
+--corr::ICount->Double
+--corr (ICount fs) = M.foldl (+) 0.0 $ M.intersectionWith (\f l -> (fromIntegral f)*l) fs wengMap
 
 -- Calculates the letter where 0 gives 'A'
 nchr::Int->Word8
@@ -113,114 +206,64 @@ toUpper :: ByteString -> ByteString
 toUpper bs = B.map (\w -> c2w $ C.toUpper $ w2c w) bs
 
 
-{-
--- Cleans cipher text of everything except alphabetic characters
-clean::(Word8->Bool)->[Word8]->[Word8]
-clean _ [] = []
-clean f (x:xs) = case f x of
-			True -> x:(clean f xs)
-			False-> clean f xs
-
-isUpperChar::Word8->Bool
-isUpperChar x = (nord x >= 0) && (nord x <26)
-
-
-
--- The number of letters in the alphabet
--- alphabet = "ABCDEFGHIJLMNOPQRSTUVWXYZ"
-
--- Shifts right according to an alphabet with nAlphabet Chars
-cShift::Word8->Word8->Word8
-cShift k c = nchr $ mod (nord k + nord c) nAlphabet
-
-  
--- Switches a->z, b->y etc (when n=26)
-reverseTxt::ByteString->ByteString       
--- reverseTxt txt = L.map (\c-> chr $ nAlphabet - ord c + 65) txt     
-reverseTxt txt = B.pack $ L.map (\c-> c2w $ chr $ nAlphabet - 1 + 2*65 - (ord $ w2c c)) $ B.unpack txt     
-            
--- works out the ic of a string split into n pieces (ie. autocorrelation)
-splitIC::Int->ByteString->Double
-splitIC n txt = (sum $ L.map (ic.txt2count) spl)/(fromIntegral n)
-        where
-            spl = splitText n txt
-            
--- split a list into n bits alternating which bit to put the next item in
-splitText::Int->[a]->[[a]]
-splitText _ [] = []
-splitText 1 xs = [xs]
-splitText n xs = A.elems $ split' 0 n init xs
-            where
-                init::Array Int [a]
-                init = listArray (0,n-1) $ B.replicate n ([])
-
-split'::Int->Int->Array Int [a]->[a]->Array Int [a]
-split' i n acc [] = acc
-split' i n acc (x:xs) = split' (mod (i+1) n) n (accum (++) acc [(i, [x])]) xs
-
--- Index of the minimum starting with 0
-ixOfMin::Ord a=>[a]->Int
-ixOfMin xs = fromJust $ B.elemIndex (B.minimum xs) xs
-
--- Index of the minimum starting with 0
-ixOfMax::Ord a=>[a]->Int
-ixOfMax xs = fromJust $ B.elemIndex (B.maximum xs) xs
-
--- Shift a character by an int
-cshift::Char->Char->Char
-cshift k ' ' = ' '
-cshift k c = chr $ (ord 'A') + (mod (ord k + ord c - ord 'A' - ord 'A') nAlphabet)
-
--- Shift a char x to a*x+b mod 26
-affineShift::Int->Int->Char->Char
-affineShift a b x = nchr $ mod ((a*nord x) + b) nAlphabet
-
--- Shift a char x to a*x+b mod 26
-affineDeshift::Int->Int->Char->Char
-affineDeshift a b x = nchr $ mod (inva*(nord x - b)) nAlphabet
-	where
-		inva = modinv nAlphabet a
--}
 
 -- Works out the correlation of an offset of n of a string with standard
 -- english text frequencies
 scorr::String->Double
 scorr pt =  L.foldl (\acc l -> acc + if isJust $ M.lookup l asciiMap then fromJust $ M.lookup l asciiMap else 0.0) 0.0 pt
         
-  
--- These are the frequencies of English text by letter        
-engFreq::[(Word8, Double)]
-engFreq = [ (c2w 'A', 0.08167)
-        ,(c2w 'B',0.01492)
-        ,(c2w 'C',0.02782)
-        ,(c2w 'D',0.04253)
-        ,(c2w 'E',0.12702)
-        ,(c2w 'F',0.02228)
-        ,(c2w 'G',0.02015)
-        ,(c2w 'H',0.06094)
-        ,(c2w 'I',0.06966)	
-        ,(c2w 'J',0.00153)
-        ,(c2w 'K',0.00772)	
-        ,(c2w 'L',0.04025)	
-        ,(c2w 'M',0.02406)	
-        ,(c2w 'N',0.06749)	
-        ,(c2w 'O',0.07507)	
-        ,(c2w 'P',0.01929)	
-        ,(c2w 'Q',0.00095)	
-        ,(c2w 'R',0.05987)	
-        ,(c2w 'S',0.06327)	
-        ,(c2w 'T',0.09056)	
-        ,(c2w 'U',0.02758)	
-        ,(c2w 'V',0.00978)	
-        ,(c2w 'W',0.02360)	
-        ,(c2w 'X',0.00150)	
-        ,(c2w 'Y',0.01974)	 
-        ,(c2w 'Z',0.00074)]
+-- Adds up the expected frequencies of each UPPERCASE char in the pt
+totalFreqUpper::String->Double
+totalFreqUpper pt =  L.foldl (\acc l -> acc + if isJust $ M.lookup (C.toUpper l) cengMap then fromJust $ M.lookup (C.toUpper l) cengMap else 0.0) 0.0 pt
+        
+totalFreq::String->Double
+totalFreq pt =  L.foldl (\acc l -> acc + if isJust $ M.lookup l asciiMap then fromJust $ M.lookup l asciiMap else 0.0) 0.0 pt
+        
+-- A maps of the frequencies, with Char ans Word8
+wengMap = L.foldl (\m f -> M.insert (fst f) (snd f) m) M.empty wengFreq                  
+cengMap = L.foldl (\m f -> M.insert (fst f) (snd f) m) M.empty cengFreq                  
+
+-- Freqencies of letters, with Word8
+wengFreq::[(Word8, Double)]
+wengFreq = L.map (\s-> (c2w $ fst s, snd s)) cengFreq 
                   
-engMap = L.foldl (\m f -> M.insert (fst f) (snd f) m) M.empty engFreq                  
-                  
+-- A map of all acii characters
+asciiMap::Map Char Double
+asciiMap = L.foldl (\m f -> M.insert (fst f) (snd f) m) M.empty asciiFreq                  
+
 target::Double
-target = (L.sum $ L.map (\x->(snd x)*(snd x)) engFreq)*(fromIntegral $ L.length engFreq)
+target = (L.sum $ L.map (\x->(snd x)*(snd x)) wengFreq)*(fromIntegral $ L.length wengFreq)
+
+
+-- These are the frequencies of English text by letter        
+cengFreq::[(Char, Double)]
+cengFreq = [ ('A', 0.08167)
+        ,('B',0.01492)
+        ,('C',0.02782)
+        ,('D',0.04253)
+        ,('E',0.12702)
+        ,('F',0.02228)
+        ,('G',0.02015)
+        ,('H',0.06094)
+        ,('I',0.06966)	
+        ,('J',0.00153)
+        ,('K',0.00772)	
+        ,('L',0.04025)	
+        ,('M',0.02406)	
+        ,('N',0.06749)	
+        ,('O',0.07507)	
+        ,('P',0.01929)	
+        ,('Q',0.00095)	
+        ,('R',0.05987)	
+        ,('S',0.06327)	
+        ,('T',0.09056)	
+        ,('U',0.02758)	
+        ,('V',0.00978)	
+        ,('W',0.02360)	
+        ,('X',0.00150)	
+        ,('Y',0.01974)	 
+        ,('Z',0.00074)]
+                  
 
 bigramFreq = [("TH",0.03880),
 	("HE",0.03680),
@@ -287,7 +330,7 @@ quadrigramFreq = [("THAT",0.00761242)
 	,("MENT",0.00223347)]
 
 
-
+-- Frequencies of letters
 asciiFreq::[(Char, Double)]
 asciiFreq = [
          (' ', 0.171662) 
@@ -380,9 +423,6 @@ asciiFreq = [
         ,('y', 0.011330) 
         ,('z', 0.000596) 
         ,('•', 0.006410) ]
-
-asciiMap::Map Char Double
-asciiMap = L.foldl (\m f -> M.insert (fst f) (snd f) m) M.empty asciiFreq                  
 
 
 
